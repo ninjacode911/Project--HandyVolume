@@ -1,0 +1,113 @@
+import cv2
+import time
+import math
+import numpy as np
+from ctypes import cast, POINTER
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import mediapipe as mp
+
+class HandTrackingModule:
+    def __init__(self, detection_confidence=0.7, tracking_confidence=0.7):
+        self.mpHands = mp.solutions.hands
+        self.hands = self.mpHands.Hands(min_detection_confidence=detection_confidence,
+                                        min_tracking_confidence=tracking_confidence)
+        self.mpDraw = mp.solutions.drawing_utils
+
+    def findHands(self, img, draw=True):
+        imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        self.results = self.hands.process(imgRGB)
+        if self.results.multi_hand_landmarks:
+            for handLms in self.results.multi_hand_landmarks:
+                if draw:
+                    self.mpDraw.draw_landmarks(img, handLms, self.mpHands.HAND_CONNECTIONS)
+        return img
+
+    def findPosition(self, img, handNo=0, draw=True):
+        """Find the landmarks of a specific hand."""
+        lmlist = []
+        if self.results.multi_hand_landmarks:
+            try:
+                myHand = self.results.multi_hand_landmarks[handNo]
+                h, w, c = img.shape
+                for id, lm in enumerate(myHand.landmark):
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    lmlist.append([id, cx, cy])
+                    if draw:
+                        cv2.circle(img, (cx, cy), 10, (255, 0, 255), cv2.FILLED)
+            except IndexError:
+                print("Error: Unable to access hand landmarks.")
+        return lmlist
+
+class VolumeControl:
+    def __init__(self):
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        self.volume = cast(interface, POINTER(IAudioEndpointVolume))
+        self.minVol = 0.0  # Minimum volume level
+        self.maxVol = 1.0  # Maximum volume level
+
+    def setVolume(self, volume_level):
+        try:
+            self.volume.SetMasterVolumeLevelScalar(volume_level, None)
+            print(f"Volume set to: {volume_level * 100:.2f}%")
+        except Exception as e:
+            print(f"Error setting volume: {e}")
+
+def calculateDistance(point1, point2):
+    """Calculate Euclidean distance between two points."""
+    return math.hypot(point2[0] - point1[0], point2[1] - point1[1])
+
+def main():
+    cap = cv2.VideoCapture(0)
+    cap.set(3, 640)  # Set width
+    cap.set(4, 480)  # Set height
+
+    detector = HandTrackingModule()
+    volumeControl = VolumeControl()
+
+    pTime = 0  # Previous frame time for FPS calculation
+
+    while True:
+        success, img = cap.read()
+        if not success:
+            print("Error: Unable to capture video.")
+            break
+
+        img = detector.findHands(img)
+        lmlist = detector.findPosition(img, draw=False)
+
+        if len(lmlist) >= 8:  # Ensure both thumb and index finger landmarks are detected
+            x1, y1 = lmlist[4][1], lmlist[4][2]  # Thumb tip
+            x2, y2 = lmlist[8][1], lmlist[8][2]  # Index finger tip
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+            # Draw the connecting line and points
+            cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            cv2.circle(img, (cx, cy), 10, (255, 0, 0), cv2.FILLED)
+
+            # Calculate the distance and map to volume range
+            length = calculateDistance((x1, y1), (x2, y2))
+            volume_level = np.interp(length, [20, 200], [volumeControl.minVol, volumeControl.maxVol])
+            volumeControl.setVolume(volume_level)
+
+            # Visual cue for minimum distance
+            if length < 30:
+                cv2.circle(img, (cx, cy), 15, (0, 255, 0), cv2.FILLED)
+
+        # Display FPS
+        cTime = time.time()
+        fps = 1 / (cTime - pTime) if pTime != 0 else 0
+        pTime = cTime
+        cv2.putText(img, f'FPS: {int(fps)}', (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+        # Show the webcam feed
+        cv2.imshow('Hand Volume Control', img)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
